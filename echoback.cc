@@ -21,7 +21,7 @@
 #include "suppressor.h"
 
 constexpr int kSampleRateHz = 16000;
-constexpr int kBlockLen = 160;  // 10 ms frame at 16 kHz
+constexpr int kBlockLen = 160;  // 10 ms block at 16 kHz
 
  
 
@@ -89,17 +89,17 @@ void process_available_blocks(State& s){
     } else {
       static constexpr float kInvScale = 1.0f / 32768.0f;
       static constexpr float kScale = 32767.0f;
-      std::vector<float> far_frame(kBlockLen), near_frame(kBlockLen), out_frame(kBlockLen);
+      std::vector<float> far_block_f(kBlockLen), near_block_f(kBlockLen), out_block_f(kBlockLen);
       for (int i = 0; i < kBlockLen; ++i) {
-        far_frame[i] = static_cast<float>(far_blk[i]) * kInvScale;
-        near_frame[i] = static_cast<float>(near_blk[i]) * kInvScale;
+        far_block_f[i] = static_cast<float>(far_blk[i]) * kInvScale;
+        near_block_f[i] = static_cast<float>(near_blk[i]) * kInvScale;
       }
-      s.suppressor.process_frame(far_frame.data(),
-                                 near_frame.data(),
-                                 out_frame.data(),
+      s.suppressor.process_block(far_block_f.data(),
+                                 near_block_f.data(),
+                                 out_block_f.data(),
                                  &gate_gain);
       for (int i = 0; i < kBlockLen; ++i) {
-        float sample = std::max(-1.0f, std::min(1.0f, out_frame[i]));
+        float sample = std::max(-1.0f, std::min(1.0f, out_block_f[i]));
         out_blk[i] = static_cast<int16_t>(std::lrintf(sample * kScale));
       }
     }
@@ -154,7 +154,7 @@ int pa_callback(const void* inputBuffer,
 int main(int argc, char** argv){
   EchoSuppressorConfig sup_config;
   State s;
-  // 16k/10msフレーム固定
+  // 16k/10msブロック固定
 
   // 引数パース
   for (int i = 1; i < argc; ++i) {
@@ -178,9 +178,9 @@ int main(int argc, char** argv){
       sup_config.power_ratio_alpha = std::stof(argv[++i] ? argv[i] : "1.5");
     } else if (arg.rfind("--hang=", 0) == 0) {
       std::string value = arg.substr(strlen("--hang="));
-      sup_config.hangover_frames = std::max(0, std::stoi(value));
+      sup_config.hangover_blocks = std::max(0, std::stoi(value));
     } else if (arg == "--hang" && i + 1 < argc) {
-      sup_config.hangover_frames = std::max(0, std::stoi(argv[++i] ? argv[i] : "5"));
+      sup_config.hangover_blocks = std::max(0, std::stoi(argv[++i] ? argv[i] : "5"));
     } else if (arg.rfind("--attack=", 0) == 0) {
       std::string value = arg.substr(strlen("--attack="));
       sup_config.attack = std::stof(value);
@@ -209,7 +209,7 @@ int main(int argc, char** argv){
       s.delay_target_samples = delay_blocks * block;
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
-                   "Usage: %s [--passthrough] [--input-delay-ms <ms>] [--atten-db <db>] [--rho <val>] [--ratio <val>] [--hang <frames>] [--attack <0-1>] [--release <0-1>]\n",
+                   "Usage: %s [--passthrough] [--input-delay-ms <ms>] [--atten-db <db>] [--rho <val>] [--ratio <val>] [--hang <blocks>] [--attack <0-1>] [--release <0-1>]\n",
                    argv[0]);
       return 0;
     }
@@ -223,7 +223,7 @@ int main(int argc, char** argv){
                  sup_config.atten_db,
                  sup_config.rho_thresh,
                  sup_config.power_ratio_alpha,
-                 sup_config.hangover_frames,
+                 sup_config.hangover_blocks,
                  sup_config.attack,
                  sup_config.release);
   }

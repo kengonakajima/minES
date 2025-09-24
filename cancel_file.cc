@@ -11,7 +11,7 @@
 #include "suppressor.h"
 
 constexpr int kSampleRateHz = 16000;
-constexpr int kFrameSamples = 160;
+constexpr int kBlockSamples = 160;
 
 struct Wav {
   // モノラル16kHz固定。sr/chは保持しない。
@@ -65,9 +65,9 @@ int main(int argc, char** argv){
     } else if (arg.rfind("--ratio=", 0) == 0) {
       config.power_ratio_alpha = std::stof(arg.substr(strlen("--ratio=")));
     } else if (arg == "--hang" && i + 1 < argc) {
-      config.hangover_frames = std::max(0, std::stoi(argv[++i] ? argv[i] : "5"));
+      config.hangover_blocks = std::max(0, std::stoi(argv[++i] ? argv[i] : "5"));
     } else if (arg.rfind("--hang=", 0) == 0) {
-      config.hangover_frames = std::max(0, std::stoi(arg.substr(strlen("--hang="))));
+      config.hangover_blocks = std::max(0, std::stoi(arg.substr(strlen("--hang="))));
     } else if (arg == "--attack" && i + 1 < argc) {
       config.attack = std::stof(argv[++i] ? argv[i] : "0.2");
     } else if (arg.rfind("--attack=", 0) == 0) {
@@ -79,7 +79,7 @@ int main(int argc, char** argv){
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
                    "Usage: %s [options] <render.wav> <capture.wav>\n"
-                   "  options: --atten-db <db> --rho <val> --ratio <val> --hang <frames> --attack <0-1> --release <0-1>\n",
+                   "  options: --atten-db <db> --rho <val> --ratio <val> --hang <blocks> --attack <0-1> --release <0-1>\n",
                    argv[0]);
       return 0;
     } else {
@@ -101,16 +101,16 @@ int main(int argc, char** argv){
     std::fprintf(stderr, "Failed to read 16k-mono wavs\n");
     return 1;
   }
-  size_t frames = std::min(x.samples.size(), y.samples.size()) /
-                  static_cast<size_t>(kFrameSamples);
-  if (frames == 0) {
+  size_t blocks = std::min(x.samples.size(), y.samples.size()) /
+                  static_cast<size_t>(kBlockSamples);
+  if (blocks == 0) {
     std::fprintf(stderr, "Not enough samples to process.\n");
     return 1;
   }
 
   EchoSuppressor suppressor(kSampleRateHz, config);
-  std::vector<int16_t> processed(frames * kFrameSamples);
-  std::vector<float> far_frame(kFrameSamples), near_frame(kFrameSamples), out_frame(kFrameSamples);
+  std::vector<int16_t> processed(blocks * kBlockSamples);
+  std::vector<float> far_block(kBlockSamples), near_block(kBlockSamples), out_block(kBlockSamples);
   static constexpr float kInvScale = 1.0f / 32768.0f;
   static constexpr float kScale = 32767.0f;
 
@@ -119,24 +119,24 @@ int main(int argc, char** argv){
                config.atten_db,
                config.rho_thresh,
                config.power_ratio_alpha,
-               config.hangover_frames,
+               config.hangover_blocks,
                config.attack,
                config.release);
 
-  for (size_t n = 0; n < frames; ++n) {
-    const size_t offset = n * kFrameSamples;
-    for (int i = 0; i < kFrameSamples; ++i) {
-      far_frame[i] = static_cast<float>(x.samples[offset + i]) * kInvScale;
-      near_frame[i] = static_cast<float>(y.samples[offset + i]) * kInvScale;
+  for (size_t n = 0; n < blocks; ++n) {
+    const size_t offset = n * kBlockSamples;
+    for (int i = 0; i < kBlockSamples; ++i) {
+      far_block[i] = static_cast<float>(x.samples[offset + i]) * kInvScale;
+      near_block[i] = static_cast<float>(y.samples[offset + i]) * kInvScale;
     }
     float gate_gain = 1.0f;
-    suppressor.process_frame(far_frame.data(),
-                             near_frame.data(),
-                             out_frame.data(),
+    suppressor.process_block(far_block.data(),
+                             near_block.data(),
+                             out_block.data(),
                              &gate_gain);
     float mute_ratio = std::max(0.0f, 1.0f - gate_gain);
-    for (int i = 0; i < kFrameSamples; ++i) {
-      float sample = std::max(-1.0f, std::min(1.0f, out_frame[i]));
+    for (int i = 0; i < kBlockSamples; ++i) {
+      float sample = std::max(-1.0f, std::min(1.0f, out_block[i]));
       processed[offset + i] = static_cast<int16_t>(std::lrintf(sample * kScale));
     }
     std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f)\n",
