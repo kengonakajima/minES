@@ -4,9 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <vector>
-
 #include <limits>
+#include <vector>
 
 inline const char* GainMeterString(float gain) {
   float g = std::clamp(gain, 0.0f, 1.0f);
@@ -17,27 +16,23 @@ inline const char* GainMeterString(float gain) {
   return "****";
 }
 
-struct EchoSuppressorConfig {
-  float rho_thresh = 0.6f;         // スコアしきい値
-  float power_ratio_alpha = 1.3f;  // P_y < alpha * P_x
-  float atten_db = -80.0f;         // 抑圧時ゲイン[dB]
-  int hangover_blocks = 20;        // 抑圧継続ブロック数
-  float attack = 0.1f;             // 抑圧時のゲイン追従（適度に速い）
-  float release = 0.01f;           // 解除時のゲイン追従
-};
-
 class EchoSuppressor {
  public:
-  explicit EchoSuppressor(int sample_rate = 16000,
-                          const EchoSuppressorConfig& config = {})
-      : fs_(sample_rate) {
-    block_samples_ = std::max(1, fs_ / 100);         // 10ms幅のブロック
-    max_lag_samples_ = std::max(block_samples_,      // ブロック長以上になるように確保
-                                static_cast<int>(0.08f * static_cast<float>(fs_)));
-    const size_t hist_len = static_cast<size_t>(max_lag_samples_) +
-                            static_cast<size_t>(block_samples_) * 4;
+  static constexpr int kSampleRate = 16000;
+  static constexpr int kBlockSamples = kSampleRate / 100;   // 10 ms
+  static constexpr int kMaxLagSamples = static_cast<int>(0.08f * static_cast<float>(kSampleRate));
+  static constexpr int kLagStep = kSampleRate / 1000;       // 1 ms
+  static constexpr float kRhoThresh = 0.6f;
+  static constexpr float kPowerRatioAlpha = 1.3f;
+  static constexpr float kAttenLinear = 0.0001f;            // 10^(-80/20)
+  static constexpr int kHangoverBlocks = 20;
+  static constexpr float kAttack = 0.1f;
+  static constexpr float kRelease = 0.01f;
+
+  EchoSuppressor() {
+    const size_t hist_len = static_cast<size_t>(kMaxLagSamples) +
+                            static_cast<size_t>(kBlockSamples) * 4;
     far_hist_.assign(hist_len, 0.0f);
-    set_config(config);
     reset();
   }
 
@@ -48,28 +43,17 @@ class EchoSuppressor {
     hang_cnt_ = 0;
   }
 
-  int block_samples() const { return block_samples_; }
-
-  void set_config(const EchoSuppressorConfig& config) {
-    config_ = config;
-    atten_linear_ = std::pow(10.0f, config_.atten_db / 20.0f);
-    // ゼロに近いときの安全策
-    if (atten_linear_ < 0.0f) {
-      atten_linear_ = 0.0f;
-    }
-  }
-
-  const EchoSuppressorConfig& config() const { return config_; }
+  int block_samples() const { return kBlockSamples; }
 
   bool process_block(const float* far,
                      const float* mic,
                      float* out,
                      float* applied_gain = nullptr,
                      int* estimated_lag_samples = nullptr) {
-    const int block = block_samples_;
+    const int block = kBlockSamples;
     const size_t hist_size = far_hist_.size();
 
-    // 遠端信号を履歴バッファへ格納
+    // Step 1: 遠端ブロックを履歴バッファに書き込む
     for (int i = 0; i < block; ++i) {
       far_hist_[hist_pos_] = far[i];
       hist_pos_ = (hist_pos_ + 1) % hist_size;
@@ -84,7 +68,7 @@ class EchoSuppressor {
       return static_cast<size_t>(idx);
     };
 
-    // 現在ブロックのマイク電力
+    // Step 2: マイクブロックの電力を計算
     float mic_pow = 0.0f;
     for (int i = 0; i < block; ++i) {
       mic_pow += mic[i] * mic[i];
@@ -97,13 +81,13 @@ class EchoSuppressor {
     }
     mic_abs = std::max(mic_abs, 1e-9f);
 
-    // 1msごと（最低でも1サンプルごと）にAMDF探索
-    const int lag_step = std::max(1, fs_ / 1000);
+    // Step 3: AMDFベースで遅延探索
+    const int lag_step = kLagStep;
     float best_score = -std::numeric_limits<float>::infinity();
     int best_lag = 0;
     float best_far_pow = 1e-9f;
 
-    for (int lag = 0; lag <= max_lag_samples_; lag += lag_step) {
+    for (int lag = 0; lag <= kMaxLagSamples; lag += lag_step) {
       float accum = 0.0f;
       float far_pow = 0.0f;
       float far_abs = 0.0f;
@@ -132,27 +116,33 @@ class EchoSuppressor {
       }
     }
 
+    // Step 4: 最良ラグでの遠端電力を確定
     best_far_pow = std::max(best_far_pow, 1e-9f);
 
-    const bool echo_detected = (best_score > config_.rho_thresh) &&
-                               (mic_pow < config_.power_ratio_alpha * best_far_pow);
+    // Step 5: スコア・パワー条件でエコー検出
+    const bool echo_detected = (best_score > kRhoThresh) &&
+                               (mic_pow < kPowerRatioAlpha * best_far_pow);
 
     if (estimated_lag_samples) {
       *estimated_lag_samples = echo_detected ? best_lag : -1;
     }
 
+    // Step 6: ハングオーバ制御
     bool suppress = echo_detected;
     if (suppress) {
-      hang_cnt_ = config_.hangover_blocks;
+      hang_cnt_ = kHangoverBlocks;
     } else if (hang_cnt_ > 0) {
       --hang_cnt_;
       suppress = true;
     }
 
-    const float target_gain = suppress ? atten_linear_ : 1.0f;
-    const float coeff = (target_gain < gate_gain_) ? config_.attack : config_.release;
+    // Step 7: ターゲットゲイン設定
+    const float target_gain = suppress ? kAttenLinear : 1.0f;
+    // Step 8: ゲイン追従（攻撃/解放）
+    const float coeff = (target_gain < gate_gain_) ? kAttack : kRelease;
     gate_gain_ = (1.0f - coeff) * gate_gain_ + coeff * target_gain;
 
+    // Step 9: 出力生成
     for (int i = 0; i < block; ++i) {
       out[i] = mic[i] * gate_gain_;
     }
@@ -163,12 +153,6 @@ class EchoSuppressor {
   }
 
  private:
-  int fs_;
-  int block_samples_;
-  int max_lag_samples_;
-  EchoSuppressorConfig config_{};
-  float atten_linear_ = std::pow(10.0f, -18.0f / 20.0f);
-
   std::vector<float> far_hist_;
   size_t hist_pos_ = 0;
   float gate_gain_ = 1.0f;

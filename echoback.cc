@@ -44,7 +44,7 @@ struct State {
 
   // --passthrough: AEC を行わず素通し再生
   bool passthrough = false;
-  EchoSuppressor suppressor{kSampleRateHz};
+  EchoSuppressor suppressor;
   size_t block_counter = 0;
 
   // 単一インスタンス化API。個別インスタンスは不要。
@@ -165,7 +165,6 @@ int pa_callback(const void* inputBuffer,
 }
 
 int main(int argc, char** argv){
-  EchoSuppressorConfig sup_config;
   State s;
   // 16k/10msブロック固定
 
@@ -174,36 +173,6 @@ int main(int argc, char** argv){
     std::string arg(argv[i] ? argv[i] : "");
     if (arg == "--passthrough" || arg == "-p") {
       s.passthrough = true;
-    } else if (arg.rfind("--atten-db=", 0) == 0) {
-      std::string value = arg.substr(strlen("--atten-db="));
-      sup_config.atten_db = std::stof(value);
-    } else if (arg == "--atten-db" && i + 1 < argc) {
-      sup_config.atten_db = std::stof(argv[++i] ? argv[i] : "-18");
-    } else if (arg.rfind("--rho=", 0) == 0) {
-      std::string value = arg.substr(strlen("--rho="));
-      sup_config.rho_thresh = std::stof(value);
-    } else if (arg == "--rho" && i + 1 < argc) {
-      sup_config.rho_thresh = std::stof(argv[++i] ? argv[i] : "0.6");
-    } else if (arg.rfind("--ratio=", 0) == 0) {
-      std::string value = arg.substr(strlen("--ratio="));
-      sup_config.power_ratio_alpha = std::stof(value);
-    } else if (arg == "--ratio" && i + 1 < argc) {
-      sup_config.power_ratio_alpha = std::stof(argv[++i] ? argv[i] : "1.5");
-    } else if (arg.rfind("--hang=", 0) == 0) {
-      std::string value = arg.substr(strlen("--hang="));
-      sup_config.hangover_blocks = std::max(0, std::stoi(value));
-    } else if (arg == "--hang" && i + 1 < argc) {
-      sup_config.hangover_blocks = std::max(0, std::stoi(argv[++i] ? argv[i] : "5"));
-    } else if (arg.rfind("--attack=", 0) == 0) {
-      std::string value = arg.substr(strlen("--attack="));
-      sup_config.attack = std::stof(value);
-    } else if (arg == "--attack" && i + 1 < argc) {
-      sup_config.attack = std::stof(argv[++i] ? argv[i] : "0.1");
-    } else if (arg.rfind("--release=", 0) == 0) {
-      std::string value = arg.substr(strlen("--release="));
-      sup_config.release = std::stof(value);
-    } else if (arg == "--release" && i + 1 < argc) {
-      sup_config.release = std::stof(argv[++i] ? argv[i] : "0.01");
     } else if (arg.rfind("--input-delay-ms=", 0) == 0) {
       std::string value = arg.substr(strlen("--input-delay-ms="));
       long long delay_ms = std::stoll(value);
@@ -222,23 +191,25 @@ int main(int argc, char** argv){
       s.delay_target_samples = delay_blocks * block;
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
-                   "Usage: %s [--passthrough] [--input-delay-ms <ms>] [--atten-db <db>] [--rho <val>] [--ratio <val>] [--hang <blocks>] [--attack <0-1>] [--release <0-1>]\n",
+                   "Usage: %s [--passthrough] [--input-delay-ms <ms>]\n",
                    argv[0]);
       return 0;
+    } else {
+      std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
+      return 1;
     }
   }
-  s.suppressor.set_config(sup_config);
   const char* mode = s.passthrough ? "passthrough" : "suppressor";
   std::fprintf(stderr, "echoback (16k mono): mode=%s\n", mode);
   if (!s.passthrough) {
     std::fprintf(stderr,
                  "  config: atten=%.1f dB, rho=%.2f, ratio=%.2f, hang=%d, attack=%.3f, release=%.3f\n",
-                 sup_config.atten_db,
-                 sup_config.rho_thresh,
-                 sup_config.power_ratio_alpha,
-                 sup_config.hangover_blocks,
-                 sup_config.attack,
-                 sup_config.release);
+                 -80.0f,
+                 EchoSuppressor::kRhoThresh,
+                 EchoSuppressor::kPowerRatioAlpha,
+                 EchoSuppressor::kHangoverBlocks,
+                 EchoSuppressor::kAttack,
+                 EchoSuppressor::kRelease);
   }
   // 固定設定のため追加初期化不要
 

@@ -47,48 +47,25 @@ bool read_wav_pcm16_mono16k(const std::string& path, Wav* out){
 }
 
 int main(int argc, char** argv){
-  EchoSuppressorConfig config;
   std::vector<std::string> positional;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i] ? argv[i] : "");
-    if (arg == "--atten-db" && i + 1 < argc) {
-      config.atten_db = std::stof(argv[++i] ? argv[i] : "-18");
-    } else if (arg.rfind("--atten-db=", 0) == 0) {
-      config.atten_db = std::stof(arg.substr(strlen("--atten-db=")));
-    } else if (arg == "--rho" && i + 1 < argc) {
-      config.rho_thresh = std::stof(argv[++i] ? argv[i] : "0.6");
-    } else if (arg.rfind("--rho=", 0) == 0) {
-      config.rho_thresh = std::stof(arg.substr(strlen("--rho=")));
-    } else if (arg == "--ratio" && i + 1 < argc) {
-      config.power_ratio_alpha = std::stof(argv[++i] ? argv[i] : "1.5");
-    } else if (arg.rfind("--ratio=", 0) == 0) {
-      config.power_ratio_alpha = std::stof(arg.substr(strlen("--ratio=")));
-    } else if (arg == "--hang" && i + 1 < argc) {
-      config.hangover_blocks = std::max(0, std::stoi(argv[++i] ? argv[i] : "5"));
-    } else if (arg.rfind("--hang=", 0) == 0) {
-      config.hangover_blocks = std::max(0, std::stoi(arg.substr(strlen("--hang="))));
-    } else if (arg == "--attack" && i + 1 < argc) {
-      config.attack = std::stof(argv[++i] ? argv[i] : "0.1");
-    } else if (arg.rfind("--attack=", 0) == 0) {
-      config.attack = std::stof(arg.substr(strlen("--attack=")));
-    } else if (arg == "--release" && i + 1 < argc) {
-      config.release = std::stof(argv[++i] ? argv[i] : "0.01");
-    } else if (arg.rfind("--release=", 0) == 0) {
-      config.release = std::stof(arg.substr(strlen("--release=")));
-    } else if (arg == "--help" || arg == "-h") {
+    if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
-                   "Usage: %s [options] <render.wav> <capture.wav>\n"
-                   "  options: --atten-db <db> --rho <val> --ratio <val> --hang <blocks> --attack <0-1> --release <0-1>\n",
+                   "Usage: %s <render.wav> <capture.wav>\n",
                    argv[0]);
       return 0;
+    } else if (!arg.empty() && arg[0] == '-') {
+      std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
+      return 1;
     } else {
       positional.push_back(arg);
     }
   }
 
   if (positional.size() < 2){
-    std::fprintf(stderr, "Usage: %s [options] <render.wav> <capture.wav>\n", argv[0]);
+    std::fprintf(stderr, "Usage: %s <render.wav> <capture.wav>\n", argv[0]);
     return 1;
   }
 
@@ -108,7 +85,7 @@ int main(int argc, char** argv){
     return 1;
   }
 
-  EchoSuppressor suppressor(kSampleRateHz, config);
+  EchoSuppressor suppressor;
   std::vector<int16_t> processed(blocks * kBlockSamples);
   std::vector<float> far_block(kBlockSamples), near_block(kBlockSamples), out_block(kBlockSamples);
   static constexpr float kInvScale = 1.0f / 32768.0f;
@@ -116,12 +93,12 @@ int main(int argc, char** argv){
 
   std::fprintf(stderr,
                "config: atten=%.1f dB, rho=%.2f, ratio=%.2f, hang=%d, attack=%.3f, release=%.3f\n",
-               config.atten_db,
-               config.rho_thresh,
-               config.power_ratio_alpha,
-               config.hangover_blocks,
-               config.attack,
-               config.release);
+               -80.0f,
+               EchoSuppressor::kRhoThresh,
+               EchoSuppressor::kPowerRatioAlpha,
+               EchoSuppressor::kHangoverBlocks,
+               EchoSuppressor::kAttack,
+               EchoSuppressor::kRelease);
 
   for (size_t n = 0; n < blocks; ++n) {
     const size_t offset = n * kBlockSamples;
