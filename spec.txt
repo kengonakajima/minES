@@ -25,7 +25,8 @@ minES エコー抑圧サンプル 動作仕様
 --------------------------
 1. 遠端ブロックを履歴バッファ（リング）へ書き込む。
 2. マイクブロックの電力 `P_mic = \sum_{i=0}^{B-1} mic_i^2` を計算し、下限 `1e-9` でクリップ。
-3. 正規化相互相関 (NCC) を用いて、遅延 `lag` ごとに次式を評価する（`B` はブロック長、`far_{lag,i}` は遅延後の遠端サンプル）。
+3. 遅延探索は構成に応じた類似度指標を用いて行う。
+   - `lag_metric = ncc`（既定）では正規化相互相関 (NCC, Normalized Cross Correlation) を評価する（`B` はブロック長、`far_{lag,i}` は遅延後の遠端サンプル）。
 
    `num(lag) = \sum_{i=0}^{B-1} far_{lag,i} · mic_i`
 
@@ -34,9 +35,18 @@ minES エコー抑圧サンプル 動作仕様
    `ρ(lag) = num(lag) / √(P_far(lag) · P_mic)`
 
    検索は 1 ms ごとの間引き（`lag_step = max(1, fs/1000)`）で `lag ∈ [0, max_lag]` を走査し、最大相関を与える `ρ_best` と `lag_best` を取得する。
+   - `lag_metric = amdf` を指定した場合は平均絶対差関数 (AMDF, Average Magnitude Difference Function) を用いる。
+
+     `D(lag) = \sum_{i=0}^{B-1} |far_{lag,i} - mic_i|`
+
+     `A(lag) = \sum_{i=0}^{B-1} |far_{lag,i}|`
+
+     類似度スコアは `σ(lag) = 1 - D(lag) / (A(lag) + \sum_{i=0}^{B-1} |mic_i|)` とし、0〜1付近の範囲で大きいほどエコーに近いとみなす。
+
+   いずれの指標でも、最大スコアとなる遅延 `lag_best` を求め、対応するスコアを `ρ_best` として扱う。
 4. `lag_best` における遠端電力 `P_far_best` を再計算し、下限 `1e-9` でクリップ。
 5. エコー検出条件:
-   - `ρ_best > rho_thresh`
+   - `ρ_best > rho_thresh`（NCC/AMDF 共通の類似度しきい値）
    - `P_mic < power_ratio_alpha · P_far_best`
    条件を満たすと抑圧フラグ `suppress = true`。
 6. ハングオーバ制御: 抑圧が成立した場合 `hang_cnt = hangover_blocks` にリロードし、抑圧が連続して継続する。カウンタが正の間は抑圧を維持する。
@@ -58,13 +68,13 @@ minES エコー抑圧サンプル 動作仕様
 - `power_ratio_alpha` : マイク/遠端パワー比の上限。`P_mic` が `α · P_far_best` 未満の時のみ抑圧する。
 - `atten_db` : 抑圧時ゲイン[dB]。線形変換は `atten_linear = 10^{atten_db / 20}`。
 - `hangover_blocks` : 抑圧継続に使うブロック数（例: 20 ≒ 200 ms）。
-- `attack` / `release` : ゲイン変化の追従係数。`attack=1.0` で即時抑圧、`release` が小さいほどゆっくり回復。
+- `attack` / `release` : ゲイン変化の追従係数。既定は `attack=0.1`、`release=0.01`。
 
 5. 実行時のインタフェース
 ----------------------------
-- `EchoSuppressor::process_block(far, mic, out, applied_gain)` がブロック処理の中心。
+- `EchoSuppressor::process_block(far, mic, out, applied_gain, estimated_lag)` がブロック処理の中心。最終引数は省略可能で、推定遅延サンプル数を受け取る。
 - オフライン・オンライン両サンプルは同一 API を使用し、`--hang` オプションはブロック数で指定する。
-- ログ出力では各ブロックのミュート率 `mute = 1 - g_new` とゲイン `g_new` を報告する。
+- ログ出力では各ブロックのミュート率 `mute = 1 - g_new`、ゲイン `g_new`、遅延推定 `lag`（サンプル単位）を報告する。遅延が検出されないブロックでは `lag=--` を表示する。ゲインは `    ` / `*   ` / `**  ` / `*** ` / `****` の段階指標も併記する。
 
 6. 実装上の注意
 ----------------

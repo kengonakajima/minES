@@ -7,6 +7,7 @@
 #include <string>
 #include <fstream>
 #include <cstring>
+#include <cctype>
 
 #include "suppressor.h"
 
@@ -50,6 +51,23 @@ int main(int argc, char** argv){
   EchoSuppressorConfig config;
   std::vector<std::string> positional;
 
+  auto parse_metric = [](const std::string& value, LagMetric* metric) {
+    std::string lowered = value;
+    for (char& ch : lowered) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (lowered == "ncc") {
+      *metric = LagMetric::kNCC;
+      return true;
+    }
+    if (lowered == "amdf") {
+      *metric = LagMetric::kAMDF;
+      return true;
+    }
+    std::fprintf(stderr, "Unknown lag metric '%s'. Use 'ncc' or 'amdf'.\n", value.c_str());
+    return false;
+  };
+
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i] ? argv[i] : "");
     if (arg == "--atten-db" && i + 1 < argc) {
@@ -76,10 +94,20 @@ int main(int argc, char** argv){
       config.release = std::stof(argv[++i] ? argv[i] : "0.02");
     } else if (arg.rfind("--release=", 0) == 0) {
       config.release = std::stof(arg.substr(strlen("--release=")));
+    } else if (arg == "--lag-metric" && i + 1 < argc) {
+      std::string value(argv[++i] ? argv[i] : "");
+      if (!parse_metric(value, &config.lag_metric)) {
+        return 1;
+      }
+    } else if (arg.rfind("--lag-metric=", 0) == 0) {
+      std::string value = arg.substr(strlen("--lag-metric="));
+      if (!parse_metric(value, &config.lag_metric)) {
+        return 1;
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
                    "Usage: %s [options] <render.wav> <capture.wav>\n"
-                   "  options: --atten-db <db> --rho <val> --ratio <val> --hang <blocks> --attack <0-1> --release <0-1>\n",
+                   "  options: --atten-db <db> --rho <val> --ratio <val> --hang <blocks> --attack <0-1> --release <0-1> --lag-metric <ncc|amdf>\n",
                    argv[0]);
       return 0;
     } else {
@@ -115,13 +143,14 @@ int main(int argc, char** argv){
   static constexpr float kScale = 32767.0f;
 
   std::fprintf(stderr,
-               "config: atten=%.1f dB, rho=%.2f, ratio=%.2f, hang=%d, attack=%.3f, release=%.3f\n",
+               "config: atten=%.1f dB, rho=%.2f, ratio=%.2f, hang=%d, attack=%.3f, release=%.3f, lag-metric=%s\n",
                config.atten_db,
                config.rho_thresh,
                config.power_ratio_alpha,
                config.hangover_blocks,
                config.attack,
-               config.release);
+               config.release,
+               LagMetricName(config.lag_metric));
 
   for (size_t n = 0; n < blocks; ++n) {
     const size_t offset = n * kBlockSamples;
@@ -130,19 +159,32 @@ int main(int argc, char** argv){
       near_block[i] = static_cast<float>(y.samples[offset + i]) * kInvScale;
     }
     float gate_gain = 1.0f;
+    int estimated_lag = 0;
     suppressor.process_block(far_block.data(),
                              near_block.data(),
                              out_block.data(),
-                             &gate_gain);
+                             &gate_gain,
+                             &estimated_lag);
     float mute_ratio = std::max(0.0f, 1.0f - gate_gain);
     for (int i = 0; i < kBlockSamples; ++i) {
       float sample = std::max(-1.0f, std::min(1.0f, out_block[i]));
       processed[offset + i] = static_cast<int16_t>(std::lrintf(sample * kScale));
     }
-    std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f)\n",
-                 n,
-                 mute_ratio * 100.0f,
-                 gate_gain);
+    const char* gain_meter = GainMeterString(gate_gain);
+    if (estimated_lag >= 0) {
+      std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=%d samples)\n",
+                   n,
+                   mute_ratio * 100.0f,
+                   gate_gain,
+                   gain_meter,
+                   estimated_lag);
+    } else {
+      std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=--)\n",
+                   n,
+                   mute_ratio * 100.0f,
+                   gate_gain,
+                   gain_meter);
+    }
   }
   // Save processed signal as processed.wav (PCM16 mono 16kHz)
   const uint32_t sr = kSampleRateHz;

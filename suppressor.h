@@ -4,15 +4,41 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
+
+enum class LagMetric {
+  kNCC,
+  kAMDF,
+};
+
+inline const char* LagMetricName(LagMetric metric) {
+  switch (metric) {
+    case LagMetric::kAMDF:
+      return "amdf";
+    case LagMetric::kNCC:
+    default:
+      return "ncc";
+  }
+}
+
+inline const char* GainMeterString(float gain) {
+  float g = std::clamp(gain, 0.0f, 1.0f);
+  if (g <= 0.05f) return "    ";
+  if (g <= 0.25f) return "*   ";
+  if (g <= 0.50f) return "**  ";
+  if (g <= 0.75f) return "*** ";
+  return "****";
+}
 
 struct EchoSuppressorConfig {
   float rho_thresh = 0.6f;         // 相関しきい値
   float power_ratio_alpha = 1.3f;  // P_y < alpha * P_x
   float atten_db = -80.0f;         // 抑圧時ゲイン[dB]
   int hangover_blocks = 20;        // 抑圧継続ブロック数
-  float attack = 1.0f;             // 抑圧時のゲイン追従（即時）
-  float release = 0.05f;           // 解除時のゲイン追従
+  float attack = 0.1f;             // 抑圧時のゲイン追従（適度に速い）
+  float release = 0.01f;           // 解除時のゲイン追従
+  LagMetric lag_metric = LagMetric::kNCC;  // 遅延探索の類似度指標
 };
 
 class EchoSuppressor {
@@ -53,7 +79,8 @@ class EchoSuppressor {
   bool process_block(const float* far,
                      const float* mic,
                      float* out,
-                     float* applied_gain = nullptr) {
+                     float* applied_gain = nullptr,
+                     int* estimated_lag_samples = nullptr) {
     const int block = block_samples_;
     const size_t hist_size = far_hist_.size();
 
@@ -79,43 +106,68 @@ class EchoSuppressor {
     }
     mic_pow = std::max(mic_pow, 1e-9f);
 
+    float mic_abs = 0.0f;
+    const bool use_amdf = (config_.lag_metric == LagMetric::kAMDF);
+    if (use_amdf) {
+      for (int i = 0; i < block; ++i) {
+        mic_abs += std::fabs(mic[i]);
+      }
+      mic_abs = std::max(mic_abs, 1e-9f);
+    }
+
     // 1msごと（最低でも1サンプルごと）に高速NCC探索
     // NCC=正規化相互相関（Normalized Cross-Correlation）で遠端信号とマイク信号の類似度を評価
     const int lag_step = std::max(1, fs_ / 1000);
+    float best_score = -std::numeric_limits<float>::infinity();
     int best_lag = 0;
-    float best_rho = 0.0f;
+    float best_far_pow = 1e-9f;
 
     for (int lag = 0; lag <= max_lag_samples_; lag += lag_step) {
-      float num = 0.0f;
+      float accum = 0.0f;
       float far_pow = 0.0f;
+      float far_abs = 0.0f;
       for (int i = 0; i < block; ++i) {
         const size_t idx = wrap_index(hist_pos_,
                                       -static_cast<ptrdiff_t>(block + lag) + i);
         const float fx = far_hist_[idx];
         const float my = mic[i];
-        num += fx * my;
         far_pow += fx * fx;
+        if (use_amdf) {
+          accum += std::fabs(fx - my);
+          far_abs += std::fabs(fx);
+        } else {
+          accum += fx * my;
+        }
       }
       far_pow = std::max(far_pow, 1e-9f);
-      const float rho = num / std::sqrt(far_pow * mic_pow);
-      if (rho > best_rho) {
-        best_rho = rho;
+      float score = 0.0f;
+      if (use_amdf) {
+        float denom = mic_abs + far_abs;
+        denom = std::max(denom, 1e-9f);
+        score = 1.0f - (accum / denom);
+        if (score > 1.0f) {
+          score = 1.0f;
+        } else if (score < -1.0f) {
+          score = -1.0f;
+        }
+      } else {
+        score = accum / std::sqrt(far_pow * mic_pow);
+      }
+      if (score > best_score) {
+        best_score = score;
         best_lag = lag;
+        best_far_pow = far_pow;
       }
     }
 
-    // 最適ラグ位置での電力
-    float far_pow_best = 0.0f;
-    for (int i = 0; i < block; ++i) {
-      const size_t idx = wrap_index(hist_pos_,
-                                    -static_cast<ptrdiff_t>(block + best_lag) + i);
-      const float fx = far_hist_[idx];
-      far_pow_best += fx * fx;
-    }
-    far_pow_best = std::max(far_pow_best, 1e-9f);
+    best_far_pow = std::max(best_far_pow, 1e-9f);
 
-    const bool echo_detected = (best_rho > config_.rho_thresh) &&
-                               (mic_pow < config_.power_ratio_alpha * far_pow_best);
+    const bool echo_detected = (best_score > config_.rho_thresh) &&
+                               (mic_pow < config_.power_ratio_alpha * best_far_pow);
+
+    if (estimated_lag_samples) {
+      *estimated_lag_samples = echo_detected ? best_lag : -1;
+    }
 
     bool suppress = echo_detected;
     if (suppress) {

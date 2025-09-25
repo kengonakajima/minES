@@ -17,6 +17,7 @@
 #include <deque>
 #include <string>
 #include <vector>
+#include <cctype>
 
 #include "suppressor.h"
 
@@ -40,7 +41,7 @@ struct State {
 
   // Optional startup delay for capture stream (educational jitter buffer)
   std::deque<int16_t> delay_line;  // raw capture samples waiting for release
-  size_t delay_target_samples = 0; // requested delay in samples
+  size_t delay_target_samples = static_cast<size_t>(kBlockLen) * 15; // 150 ms 初期遅延
 
   // --passthrough: AEC を行わず素通し再生
   bool passthrough = false;
@@ -84,6 +85,7 @@ void process_available_blocks(State& s){
     }
 
     float gate_gain = 1.0f;
+    int estimated_lag = 0;
     if (s.passthrough) {
       std::memcpy(out_blk.data(), near_blk.data(), kBlockLen * sizeof(int16_t));
     } else {
@@ -97,7 +99,8 @@ void process_available_blocks(State& s){
       s.suppressor.process_block(far_block_f.data(),
                                  near_block_f.data(),
                                  out_block_f.data(),
-                                 &gate_gain);
+                                 &gate_gain,
+                                 &estimated_lag);
       for (int i = 0; i < kBlockLen; ++i) {
         float sample = std::max(-1.0f, std::min(1.0f, out_block_f[i]));
         out_blk[i] = static_cast<int16_t>(std::lrintf(sample * kScale));
@@ -107,10 +110,21 @@ void process_available_blocks(State& s){
     if (!s.passthrough) {
       float mute_ratio = 1.0f - gate_gain;
       if (mute_ratio < 0.0f) mute_ratio = 0.0f;
-      std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f)\n",
-                   s.block_counter,
-                   mute_ratio * 100.0f,
-                   gate_gain);
+      const char* gain_meter = GainMeterString(gate_gain);
+      if (estimated_lag >= 0) {
+        std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=%d samples)\n",
+                     s.block_counter,
+                     mute_ratio * 100.0f,
+                     gate_gain,
+                     gain_meter,
+                     estimated_lag);
+      } else {
+        std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=--)\n",
+                     s.block_counter,
+                     mute_ratio * 100.0f,
+                     gate_gain,
+                     gain_meter);
+      }
     }
     ++s.block_counter;
 
@@ -156,6 +170,25 @@ int main(int argc, char** argv){
   State s;
   // 16k/10msブロック固定
 
+  auto parse_metric = [](const std::string& value, LagMetric* metric) {
+    std::string lowered = value;
+    for (char& ch : lowered) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (lowered == "ncc") {
+      *metric = LagMetric::kNCC;
+      return true;
+    }
+    if (lowered == "amdf") {
+      *metric = LagMetric::kAMDF;
+      return true;
+    }
+    std::fprintf(stderr,
+                 "Unknown lag metric '%s'. Use 'ncc' or 'amdf'.\n",
+                 value.c_str());
+    return false;
+  };
+
   // 引数パース
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i] ? argv[i] : "");
@@ -191,6 +224,16 @@ int main(int argc, char** argv){
       sup_config.release = std::stof(value);
     } else if (arg == "--release" && i + 1 < argc) {
       sup_config.release = std::stof(argv[++i] ? argv[i] : "0.02");
+    } else if (arg.rfind("--lag-metric=", 0) == 0) {
+      std::string value = arg.substr(strlen("--lag-metric="));
+      if (!parse_metric(value, &sup_config.lag_metric)) {
+        return 1;
+      }
+    } else if (arg == "--lag-metric" && i + 1 < argc) {
+      std::string value(argv[++i] ? argv[i] : "");
+      if (!parse_metric(value, &sup_config.lag_metric)) {
+        return 1;
+      }
     } else if (arg.rfind("--input-delay-ms=", 0) == 0) {
       std::string value = arg.substr(strlen("--input-delay-ms="));
       long long delay_ms = std::stoll(value);
@@ -209,7 +252,7 @@ int main(int argc, char** argv){
       s.delay_target_samples = delay_blocks * block;
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
-                   "Usage: %s [--passthrough] [--input-delay-ms <ms>] [--atten-db <db>] [--rho <val>] [--ratio <val>] [--hang <blocks>] [--attack <0-1>] [--release <0-1>]\n",
+                   "Usage: %s [--passthrough] [--input-delay-ms <ms>] [--atten-db <db>] [--rho <val>] [--ratio <val>] [--hang <blocks>] [--attack <0-1>] [--release <0-1>] [--lag-metric <ncc|amdf>]\n",
                    argv[0]);
       return 0;
     }
@@ -219,13 +262,14 @@ int main(int argc, char** argv){
   std::fprintf(stderr, "echoback (16k mono): mode=%s\n", mode);
   if (!s.passthrough) {
     std::fprintf(stderr,
-                 "  config: atten=%.1f dB, rho=%.2f, ratio=%.2f, hang=%d, attack=%.3f, release=%.3f\n",
+                 "  config: atten=%.1f dB, rho=%.2f, ratio=%.2f, hang=%d, attack=%.3f, release=%.3f, lag-metric=%s\n",
                  sup_config.atten_db,
                  sup_config.rho_thresh,
                  sup_config.power_ratio_alpha,
                  sup_config.hangover_blocks,
                  sup_config.attack,
-                 sup_config.release);
+                 sup_config.release,
+                 LagMetricName(sup_config.lag_metric));
   }
   // 固定設定のため追加初期化不要
 
