@@ -7,6 +7,7 @@
 #include <limits>
 #include <vector>
 
+// ゲイン値を粗い段階表示に変換し、ログ用のメーター文字列を返す。
 inline const char* GainMeterString(float gain) {
   float g = std::clamp(gain, 0.0f, 1.0f);
   if (g <= 0.05f) return "    ";
@@ -16,23 +17,22 @@ inline const char* GainMeterString(float gain) {
   return "****";
 }
 
-class EchoSuppressor {
- public:
-  static constexpr int kSampleRate = 16000;
-  static constexpr int kBlockSamples = kSampleRate / 100;   // 10 ms
-  static constexpr int kMaxLagSamples = static_cast<int>(0.08f * static_cast<float>(kSampleRate));
-  static constexpr int kLagStep = kSampleRate / 1000;       // 1 ms
-  static constexpr float kRhoThresh = 0.6f;
-  static constexpr float kPowerRatioAlpha = 1.3f;
-  static constexpr float kAttenLinear = 0.0001f;            // 10^(-80/20)
-  static constexpr int kHangoverBlocks = 20;
-  static constexpr float kAttack = 0.1f;
-  static constexpr float kRelease = 0.01f;
+struct EchoSuppressor {
+  static constexpr int kSampleRate = 16000;                // サプレッサ設計が想定する固定サンプリング周波数
+  static constexpr int kBlockSamples = kSampleRate / 100;  // 10 ms ブロックあたりのサンプル数（160）
+  static constexpr int kMaxLagSamples = static_cast<int>(0.5f * static_cast<float>(kSampleRate));
+  static constexpr int kLagStep = kSampleRate / 1000;      // 遅延探索ステップ幅（≒1 ms）
+  static constexpr float kRhoThresh = 0.6f;                // エコー判定に用いるAMDFスコアのしきい値
+  static constexpr float kPowerRatioAlpha = 1.3f;          // 遠端/近端の電力比条件
+  static constexpr float kAttenLinear = 0.0001f;           // 抑圧時に適用する線形ゲイン（-80 dB 相当）
+  static constexpr int kHangoverBlocks = 20;               // 抑圧状態を保持するブロック数
+  static constexpr float kAttack = 0.1f;                   // ゲインを減衰させるときの一次平滑係数
+  static constexpr float kRelease = 0.01f;                 // ゲインを復帰させるときの一次平滑係数
+  static constexpr size_t kHistLen = static_cast<size_t>(kMaxLagSamples) +
+                                     static_cast<size_t>(kBlockSamples) * 4;  // 遠端履歴バッファ長
 
   EchoSuppressor() {
-    const size_t hist_len = static_cast<size_t>(kMaxLagSamples) +
-                            static_cast<size_t>(kBlockSamples) * 4;
-    far_hist_.assign(hist_len, 0.0f);
+    far_hist_.assign(kHistLen, 0.0f);
     reset();
   }
 
@@ -45,6 +45,7 @@ class EchoSuppressor {
 
   int block_samples() const { return kBlockSamples; }
 
+  // TODO
   bool process_block(const float* far,
                      const float* mic,
                      float* out,
@@ -82,12 +83,11 @@ class EchoSuppressor {
     mic_abs = std::max(mic_abs, 1e-9f);
 
     // Step 3: AMDFベースで遅延探索
-    const int lag_step = kLagStep;
     float best_score = -std::numeric_limits<float>::infinity();
     int best_lag = 0;
     float best_far_pow = 1e-9f;
 
-    for (int lag = 0; lag <= kMaxLagSamples; lag += lag_step) {
+    for (int lag = 0; lag <= kMaxLagSamples; lag += kLagStep) {
       float accum = 0.0f;
       float far_pow = 0.0f;
       float far_abs = 0.0f;
@@ -104,11 +104,8 @@ class EchoSuppressor {
       float denom = mic_abs + far_abs;
       denom = std::max(denom, 1e-9f);
       float score = 1.0f - (accum / denom);
-      if (score > 1.0f) {
-        score = 1.0f;
-      } else if (score < -1.0f) {
-        score = -1.0f;
-      }
+      if (score > 1.0f) score = 1.0f;
+      else if (score < -1.0f) score = -1.0f;
       if (score > best_score) {
         best_score = score;
         best_lag = lag;
@@ -153,10 +150,10 @@ class EchoSuppressor {
   }
 
  private:
-  std::vector<float> far_hist_;
-  size_t hist_pos_ = 0;
-  float gate_gain_ = 1.0f;
-  int hang_cnt_ = 0;
+  std::vector<float> far_hist_;  // 遠端信号の履歴バッファ（リング）
+  size_t hist_pos_ = 0;          // 履歴バッファへの書き込み位置
+  float gate_gain_ = 1.0f;       // 現在適用中のゲイン値
+  int hang_cnt_ = 0;             // 抑圧を継続する残りブロック数
 };
 
 #endif  // MINES_SUPPRESSOR_H_

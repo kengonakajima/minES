@@ -40,7 +40,11 @@ struct State {
 
   // Optional startup delay for capture stream (educational jitter buffer)
   std::deque<int16_t> delay_line;  // raw capture samples waiting for release
-  size_t delay_target_samples = static_cast<size_t>(kBlockLen) * 25; // 250 ms 初期遅延
+  size_t delay_target_samples = 0;  // optional capture-side delay in samples (default off)
+
+  // Optional extra delay applied to far-end reference before suppression
+  std::deque<int16_t> far_delay_line;  // buffered far samples for loopback delay simulation
+  size_t loopback_delay_target_samples = 0;  // additional far-end delay in samples
 
   // --passthrough: AEC を行わず素通し再生
   bool passthrough = false;
@@ -70,6 +74,21 @@ inline void enqueue_capture_sample(State& s, int16_t sample) {
   }
 }
 
+inline void apply_loopback_delay(State& s, int16_t* block) {
+  const size_t target = s.loopback_delay_target_samples; // 回り込み音を意図的に遅らせる
+  if (target == 0) return;
+
+  for (int i = 0; i < kBlockLen; ++i) {
+    s.far_delay_line.push_back(block[i]);
+    int16_t delayed = 0;
+    if (s.far_delay_line.size() > target) {
+      delayed = s.far_delay_line.front();
+      s.far_delay_line.pop_front();
+    }
+    block[i] = delayed;
+  }
+}
+
 void process_available_blocks(State& s){
   // Run as many 10 ms (160-sample) blocks as possible
   while (s.rec_dev.size() >= static_cast<size_t>(kBlockLen)) {
@@ -82,6 +101,8 @@ void process_available_blocks(State& s){
     } else {
       std::fill(far_blk.begin(), far_blk.end(), 0);
     }
+
+    apply_loopback_delay(s, far_blk.data());
 
     float gate_gain = 1.0f;
     int estimated_lag = 0;
@@ -181,6 +202,14 @@ int main(int argc, char** argv){
       const size_t block = static_cast<size_t>(kBlockLen);
       size_t delay_blocks = (raw_samples + block / 2) / block;
       s.delay_target_samples = delay_blocks * block;
+    } else if (arg.rfind("--loopback-delay-ms=", 0) == 0) {
+      std::string value = arg.substr(strlen("--loopback-delay-ms="));
+      long long delay_ms = std::stoll(value);
+      if (delay_ms < 0) delay_ms = 0;
+      size_t raw_samples = static_cast<size_t>(
+          (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
+      s.loopback_delay_target_samples = raw_samples;
+      s.far_delay_line.clear();
     } else if (arg == "--input-delay-ms" && i + 1 < argc) {
       std::string value(argv[++i] ? argv[i] : "0");
       long long delay_ms = std::stoll(value);
@@ -189,9 +218,17 @@ int main(int argc, char** argv){
       const size_t block = static_cast<size_t>(kBlockLen);
       size_t delay_blocks = (raw_samples + block / 2) / block;
       s.delay_target_samples = delay_blocks * block;
+    } else if (arg == "--loopback-delay-ms" && i + 1 < argc) {
+      std::string value(argv[++i] ? argv[i] : "0");
+      long long delay_ms = std::stoll(value);
+      if (delay_ms < 0) delay_ms = 0;
+      size_t raw_samples = static_cast<size_t>(
+          (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
+      s.loopback_delay_target_samples = raw_samples;
+      s.far_delay_line.clear();
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
-                   "Usage: %s [--passthrough] [--input-delay-ms <ms>]\n",
+                   "Usage: %s [--passthrough] [--input-delay-ms <ms>] [--loopback-delay-ms <ms>]\n",
                    argv[0]);
       return 0;
     } else {
@@ -222,6 +259,14 @@ int main(int argc, char** argv){
                  delay_ms,
                  static_cast<double>(s.delay_target_samples),
                  blocks);
+  }
+
+  if (s.loopback_delay_target_samples > 0) {
+    double delay_ms = static_cast<double>(s.loopback_delay_target_samples) * 1000.0 /
+                      static_cast<double>(kSampleRateHz);
+    std::fprintf(stderr, "loopback delay: %.1f ms (%.0f samples)\n",
+                 delay_ms,
+                 static_cast<double>(s.loopback_delay_target_samples));
   }
 
   PaError err = Pa_Initialize();
