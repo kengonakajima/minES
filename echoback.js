@@ -6,26 +6,26 @@ const assert = require('assert');
 // EchoSuppressor を JS に移植したクラス実装
 class JsSuppressor {
   constructor() {
-    this.sampleRate = 16000;
-    this.blockSamples = this.sampleRate / 100; // 10 ms block
-    this.maxLagSamples = Math.floor(0.5 * this.sampleRate);
-    this.lagStep = Math.max(1, Math.floor(this.sampleRate / 1000));
-    this.rhoThresh = 0.6;
-    this.powerRatioAlpha = 1.3;
-    this.attenLinear = 0.0001; // -80 dB
-    this.hangoverBlocks = 20;
-    this.attack = 0.1;
-    this.release = 0.01;
-    this.histLen = this.maxLagSamples + this.blockSamples * 4;
+    this.sampleRate = 16000; // サプレッサが扱うサンプリング周波数(Hz)
+    this.blockSamples = this.sampleRate / 100; // 1ブロックあたりのサンプル数(10ms)
+    this.maxLagSamples = Math.floor(0.5 * this.sampleRate); // 遅延探索の最大サンプル数
+    this.lagStep = Math.max(1, Math.floor(this.sampleRate / 1000)); // 遅延探索のステップ幅(約1ms)
+    this.rhoThresh = 0.6; // エコー判定に用いるAMDFスコアしきい値
+    this.powerRatioAlpha = 1.3; // マイク/遠端パワー比の許容上限
+    this.attenLinear = 0.0001; // 抑圧時に掛ける線形ゲイン(約-80dB)
+    this.hangoverBlocks = 20; // 抑圧継続のためのハングオーバブロック数
+    this.attack = 0.1; // ゲインを下げるときの平滑係数
+    this.release = 0.01; // ゲインを戻すときの平滑係数
+    this.histLen = this.maxLagSamples + this.blockSamples * 4; // 遠端履歴バッファ長
 
-    this.farHist = new Float32Array(this.histLen);
-    this.histPos = 0;
-    this.gateGain = 1.0;
-    this.hangCnt = 0;
+    this.farHist = new Float32Array(this.histLen); // 遠端信号のリングバッファ
+    this.histPos = 0; // 遠端履歴への書き込み位置
+    this.gateGain = 1.0; // 現在適用している抑圧ゲイン
+    this.hangCnt = 0; // ハングオーバ残カウンタ
 
-    this.farBlock = new Float32Array(this.blockSamples);
-    this.nearBlock = new Float32Array(this.blockSamples);
-    this.outBlock = new Float32Array(this.blockSamples);
+    this.farBlock = new Float32Array(this.blockSamples); // 処理用遠端ブロック領域
+    this.nearBlock = new Float32Array(this.blockSamples); // 処理用近端ブロック領域
+    this.outBlock = new Float32Array(this.blockSamples); // 処理後出力ブロック領域
   }
 
   reset() {
@@ -55,12 +55,14 @@ class JsSuppressor {
     const block = this.blockSamples;
     const histSize = this.histLen;
 
+    // 1. 遠端ブロックを履歴バッファへ書き込む
     for (let i = 0; i < block; i++) {
       this.farHist[this.histPos] = farFloat[i];
       this.histPos++;
       if (this.histPos >= histSize) this.histPos = 0;
     }
 
+    // 2. マイクブロックの電力と絶対値和を算出
     let micPow = 0;
     let micAbs = 0;
     for (let i = 0; i < block; i++) {
@@ -71,24 +73,25 @@ class JsSuppressor {
     micPow = Math.max(micPow, 1e-9);
     micAbs = Math.max(micAbs, 1e-9);
 
+    // 3. AMDF を用いて遅延候補を走査
     let bestScore = -Infinity;
     let bestLag = 0;
     let bestFarPow = 1e-9;
 
     for (let lag = 0; lag <= this.maxLagSamples; lag += this.lagStep) {
-      let accum = 0;
-      let farPow = 0;
-      let farAbs = 0;
-      const base = -(block + lag);
+      let accum = 0; // |far - mic| の総和（AMDF）
+      let farPow = 0; // 遠端電力の積算
+      let farAbs = 0; // 遠端の絶対値和（正規化用）
+      const base = -(block + lag); // 履歴バッファで参照するオフセット
       for (let i = 0; i < block; i++) {
-        let idx = this.histPos + base + i;
-        idx %= histSize;
-        if (idx < 0) idx += histSize;
-        const fx = this.farHist[idx];
-        const my = nearFloat[i];
-        farPow += fx * fx;
-        accum += Math.abs(fx - my);
-        farAbs += Math.abs(fx);
+        let idx = this.histPos + base + i; // 現在位置から遅延分だけ戻る
+        idx %= histSize; // リングバッファなのでモジュロを取る
+        if (idx < 0) idx += histSize; // 負の位置は末尾側へ折り返し
+        const fx = this.farHist[idx]; // 遅延後の遠端サンプル
+        const my = nearFloat[i]; // 近端サンプル
+        farPow += fx * fx; // 遠端電力を積算
+        accum += Math.abs(fx - my); // 差の絶対値を積算（AMDF）
+        farAbs += Math.abs(fx); // 遠端の絶対値和を積算
       }
       farPow = Math.max(farPow, 1e-9);
       let denom = micAbs + farAbs;
@@ -103,10 +106,13 @@ class JsSuppressor {
       }
     }
 
+    // 4. 最良ラグでの遠端電力を下限付きで確定
     bestFarPow = Math.max(bestFarPow, 1e-9);
+    // 5. スコア・パワー条件でエコー検出
     const echoDetected = (bestScore > this.rhoThresh) && (micPow < this.powerRatioAlpha * bestFarPow);
     const estimatedLag = echoDetected ? bestLag : -1;
 
+    // 6. ハングオーバ制御で抑圧状態を保持
     let suppress = echoDetected;
     if (suppress) {
       this.hangCnt = this.hangoverBlocks;
@@ -115,11 +121,14 @@ class JsSuppressor {
       suppress = true;
     }
 
+    // 7. ターゲットゲインを設定
     const targetGain = suppress ? this.attenLinear : 1.0;
+    // 8. 攻撃/解放係数によるゲイン追従
     const coeff = (targetGain < this.gateGain) ? this.attack : this.release;
     this.gateGain = (1 - coeff) * this.gateGain + coeff * targetGain;
     const appliedGain = this.gateGain;
 
+    // 9. 出力生成（近端信号へゲイン適用）
     for (let i = 0; i < block; i++) {
       this.outBlock[i] = nearFloat[i] * appliedGain;
     }
