@@ -66,6 +66,7 @@ class JsSuppressor {
     const block = this.blockSamples;
     const histSize = this.histLen;
 
+    // 手順1: 遠端ブロックを履歴バッファへ書き込みリング更新を行う
     for (let i = 0; i < block; i++) {
       this.farHist[this.histPos] = farFloat[i];
       this.histPos++;
@@ -74,6 +75,7 @@ class JsSuppressor {
 
     let micPow = 0;
     let micAbs = 0;
+    // 手順2: マイクブロックの電力と絶対値和を計算し下限値でクリップ
     for (let i = 0; i < block; i++) {
       const x = nearFloat[i];
       micPow += x * x;
@@ -86,6 +88,7 @@ class JsSuppressor {
     let bestLag = 0;
     let bestFarPow = 1e-9;
 
+    // 手順3: AMDFベースの遅延探索で類似度スコアと遠端電力を求める
     for (let lag = 0; lag <= this.maxLagSamples; lag += this.lagStep) {
       let accum = 0;
       let farPow = 0;
@@ -114,12 +117,15 @@ class JsSuppressor {
       }
     }
 
+    // 手順4: 最良ラグに対する遠端電力をクリップして保持
     bestFarPow = Math.max(bestFarPow, 1e-9);
 
+    // 手順5: AMDFスコアと電力比に基づいてエコー抑圧の判定を行う
     const echoDetected = (bestScore > this.rhoThresh) && (micPow < this.powerRatioAlpha * bestFarPow);
     const estimatedLag = echoDetected ? bestLag : -1;
 
     let suppress = echoDetected;
+    // 手順6: ハングオーバ制御で抑圧状態を継続させる
     if (suppress) {
       this.hangCnt = this.hangoverBlocks;
     } else if (this.hangCnt > 0) {
@@ -127,11 +133,14 @@ class JsSuppressor {
       suppress = true;
     }
 
+    // 手順7: 抑圧状態に応じて目標ゲインを設定
     const targetGain = suppress ? this.attenLinear : 1.0;
+    // 手順8: 攻撃/解放係数を用いてゲインを平滑追従させる
     const coeff = (targetGain < this.gateGain) ? this.attack : this.release;
     this.gateGain = (1 - coeff) * this.gateGain + coeff * targetGain;
     const appliedGain = this.gateGain;
 
+    // 手順9: 決定したゲインをマイクブロックに適用して出力を生成
     for (let i = 0; i < block; i++) {
       this.outBlock[i] = nearFloat[i] * appliedGain;
     }
