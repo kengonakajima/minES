@@ -22,6 +22,8 @@
 
 constexpr int kSampleRateHz = 16000;
 constexpr int kBlockLen = 160;  // 10 ms block at 16 kHz
+constexpr int kDefaultInputDelayMs = 0;
+constexpr int kDefaultLoopbackDelayMs = 150;
 
  
 
@@ -241,6 +243,23 @@ int main(int argc, char** argv){
   State s;
   // 16k/10msブロック固定
 
+  const auto round_input_delay_to_block = [](long long delay_ms) {
+    size_t raw_samples = static_cast<size_t>(
+        (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
+    const size_t block = static_cast<size_t>(kBlockLen);
+    size_t delay_blocks = (raw_samples + block / 2) / block;
+    return delay_blocks * block;
+  };
+
+  const auto round_delay_to_samples = [](long long delay_ms) {
+    if (delay_ms < 0) delay_ms = 0;
+    return static_cast<size_t>(
+        (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
+  };
+
+  s.delay_target_samples = round_input_delay_to_block(kDefaultInputDelayMs);
+  s.loopback_delay_target_samples = round_delay_to_samples(kDefaultLoopbackDelayMs);
+
   // 引数パース
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i] ? argv[i] : "");
@@ -249,34 +268,20 @@ int main(int argc, char** argv){
     } else if (arg.rfind("--input-delay-ms=", 0) == 0) {
       std::string value = arg.substr(strlen("--input-delay-ms="));
       long long delay_ms = std::stoll(value);
-      size_t raw_samples = static_cast<size_t>(
-          (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
-      const size_t block = static_cast<size_t>(kBlockLen);
-      size_t delay_blocks = (raw_samples + block / 2) / block;
-      s.delay_target_samples = delay_blocks * block;
+      s.delay_target_samples = round_input_delay_to_block(delay_ms);
     } else if (arg.rfind("--loopback-delay-ms=", 0) == 0) {
       std::string value = arg.substr(strlen("--loopback-delay-ms="));
       long long delay_ms = std::stoll(value);
-      if (delay_ms < 0) delay_ms = 0;
-      size_t raw_samples = static_cast<size_t>(
-          (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
-      s.loopback_delay_target_samples = raw_samples;
+      s.loopback_delay_target_samples = round_delay_to_samples(delay_ms);
       s.far_delay_line.clear();
     } else if (arg == "--input-delay-ms" && i + 1 < argc) {
       std::string value(argv[++i] ? argv[i] : "0");
       long long delay_ms = std::stoll(value);
-      size_t raw_samples = static_cast<size_t>(
-          (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
-      const size_t block = static_cast<size_t>(kBlockLen);
-      size_t delay_blocks = (raw_samples + block / 2) / block;
-      s.delay_target_samples = delay_blocks * block;
+      s.delay_target_samples = round_input_delay_to_block(delay_ms);
     } else if (arg == "--loopback-delay-ms" && i + 1 < argc) {
       std::string value(argv[++i] ? argv[i] : "0");
       long long delay_ms = std::stoll(value);
-      if (delay_ms < 0) delay_ms = 0;
-      size_t raw_samples = static_cast<size_t>(
-          (delay_ms * static_cast<long long>(kSampleRateHz) + 999) / 1000);
-      s.loopback_delay_target_samples = raw_samples;
+      s.loopback_delay_target_samples = round_delay_to_samples(delay_ms);
       s.far_delay_line.clear();
     } else if (arg == "--help" || arg == "-h") {
       std::fprintf(stderr,
