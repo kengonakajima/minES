@@ -51,6 +51,16 @@ struct State {
   EchoSuppressor suppressor;
   size_t block_counter = 0;
 
+  // 遅延推定の観察用統計
+  std::deque<int> lag_history;
+  long long lag_sum = 0;
+  size_t lag_history_limit = 10;
+  bool lag_stats_ready = false;
+  double lag_avg_latest = 0.0;
+  int lag_min_window = 0;
+  int lag_max_window = 0;
+  int lag_last = -1;
+
   // 単一インスタンス化API。個別インスタンスは不要。
 };
 
@@ -101,8 +111,9 @@ void process_available_blocks(State& s){
     } else {
       std::fill(far_blk.begin(), far_blk.end(), 0);
     }
+    std::vector<int16_t> speaker_blk = far_blk;  // スピーカへ送る信号は個別に遅延する
 
-    apply_loopback_delay(s, far_blk.data());
+    apply_loopback_delay(s, speaker_blk.data());
 
     float gate_gain = 1.0f;
     int estimated_lag = 0;
@@ -127,17 +138,58 @@ void process_available_blocks(State& s){
       }
     }
 
+    if (estimated_lag >= 0) {
+      s.lag_history.push_back(estimated_lag);
+      s.lag_sum += estimated_lag;
+      if (s.lag_history.size() > s.lag_history_limit) {
+        s.lag_sum -= s.lag_history.front();
+        s.lag_history.pop_front();
+      }
+      const size_t window_size = s.lag_history.size();
+      if (window_size > 0) {
+        int min_val = s.lag_history.front();
+        int max_val = s.lag_history.front();
+        for (int lag_sample : s.lag_history) {
+          if (lag_sample < min_val) {
+            min_val = lag_sample;
+          }
+          if (lag_sample > max_val) {
+            max_val = lag_sample;
+          }
+        }
+        s.lag_avg_latest = static_cast<double>(s.lag_sum) / static_cast<double>(window_size);
+        s.lag_min_window = min_val;
+        s.lag_max_window = max_val;
+        s.lag_last = estimated_lag;
+        s.lag_stats_ready = true;
+      }
+    }
+    const size_t lag_window_size = s.lag_history.size();
+
     if (!s.passthrough) {
       float mute_ratio = 1.0f - gate_gain;
       if (mute_ratio < 0.0f) mute_ratio = 0.0f;
       const char* gain_meter = GainMeterString(gate_gain);
-      if (estimated_lag >= 0) {
-        std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=%d samples)\n",
+      if (s.lag_stats_ready) {
+        char lag_current_buf[32];
+        const char* lag_current_str = "--";
+        if (estimated_lag >= 0) {
+          std::snprintf(lag_current_buf, sizeof(lag_current_buf), "%d", estimated_lag);
+          lag_current_str = lag_current_buf;
+        }
+        const size_t avg_window = lag_window_size > 0 ? lag_window_size : s.lag_history_limit;
+        std::fprintf(stderr,
+                     "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=%s samples; avg%zu=%.1f, min=%d, max=%d, last=%d)\n",
                      s.block_counter,
                      mute_ratio * 100.0f,
                      gate_gain,
                      gain_meter,
-                     estimated_lag);
+                     lag_current_str,
+                     avg_window,
+                     s.lag_avg_latest,
+                     s.lag_min_window,
+                     s.lag_max_window,
+                     s.lag_last);
       } else {
         std::fprintf(stderr, "[block %zu] mute=%.1f%% (gain=%.3f %s, lag=--)\n",
                      s.block_counter,
@@ -151,8 +203,8 @@ void process_available_blocks(State& s){
     // ローカル・ループバック: 処理後の出力を蓄積して、次々回以降の far にする
     push_block(s.jitter, out_blk.data(), kBlockLen);
 
-    // 今回のスピーカ出力は `far_blk`
-    push_block(s.out_dev, far_blk.data(), kBlockLen);
+    // 今回のスピーカ出力はループバック遅延を適用した信号
+    push_block(s.out_dev, speaker_blk.data(), kBlockLen);
   }
 }
 
@@ -250,23 +302,25 @@ int main(int argc, char** argv){
   }
   // 固定設定のため追加初期化不要
 
-  if (s.delay_target_samples > 0) {
-    double delay_ms = static_cast<double>(s.delay_target_samples) * 1000.0 /
-                      static_cast<double>(kSampleRateHz);
-    double blocks = static_cast<double>(s.delay_target_samples) /
-                    static_cast<double>(kBlockLen);
-    std::fprintf(stderr, "capture delay: %.1f ms (%.0f samples, %.1f blocks)\n",
-                 delay_ms,
-                 static_cast<double>(s.delay_target_samples),
-                 blocks);
+  {
+    const double input_delay_ms = static_cast<double>(s.delay_target_samples) * 1000.0 /
+                                  static_cast<double>(kSampleRateHz);
+    const double input_delay_blocks = static_cast<double>(s.delay_target_samples) /
+                                      static_cast<double>(kBlockLen);
+    std::fprintf(stderr,
+                 "input-delay-ms(final): %.1f ms (%zu samples, %.1f blocks)\n",
+                 input_delay_ms,
+                 s.delay_target_samples,
+                 input_delay_blocks);
   }
 
-  if (s.loopback_delay_target_samples > 0) {
-    double delay_ms = static_cast<double>(s.loopback_delay_target_samples) * 1000.0 /
-                      static_cast<double>(kSampleRateHz);
-    std::fprintf(stderr, "loopback delay: %.1f ms (%.0f samples)\n",
-                 delay_ms,
-                 static_cast<double>(s.loopback_delay_target_samples));
+  {
+    const double loopback_delay_ms = static_cast<double>(s.loopback_delay_target_samples) * 1000.0 /
+                                     static_cast<double>(kSampleRateHz);
+    std::fprintf(stderr,
+                 "loopback-delay-ms(final): %.1f ms (%zu samples)\n",
+                 loopback_delay_ms,
+                 s.loopback_delay_target_samples);
   }
 
   PaError err = Pa_Initialize();
