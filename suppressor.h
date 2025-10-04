@@ -1,6 +1,3 @@
-#ifndef MINES_SUPPRESSOR_H_
-#define MINES_SUPPRESSOR_H_
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -100,9 +97,9 @@ struct EchoSuppressor {
         const size_t idx = wrap_index(hist_pos_,
                                       -static_cast<ptrdiff_t>(block + lag) + i);
         const float fx = far_hist_[idx];
-        const float my = near[i];
+        const float ny = near[i];
         far_pow += fx * fx;
-        accum += std::fabs(fx - my);
+        accum += std::fabs(fx - ny);
         far_abs += std::fabs(fx);
       }
       far_pow = std::max(far_pow, 1e-9f);
@@ -156,4 +153,4 @@ struct EchoSuppressor {
 
 };
 
-#endif  // MINES_SUPPRESSOR_H_
+
