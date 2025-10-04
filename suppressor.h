@@ -31,6 +31,11 @@ struct EchoSuppressor {
   static constexpr size_t kHistLen = static_cast<size_t>(kMaxLagSamples) +
                                      static_cast<size_t>(kBlockSamples) * 4;  // 遠端履歴バッファ長
 
+  std::vector<float> far_hist_;  // 遠端信号の履歴バッファ（リング）
+  size_t hist_pos_ = 0;          // 履歴バッファへの書き込み位置
+  float gate_gain_ = 1.0f;       // 現在適用中のゲイン値
+  int hang_cnt_ = 0;             // 抑圧を継続する残りブロック数
+    
   EchoSuppressor() {
     far_hist_.assign(kHistLen, 0.0f);
     reset();
@@ -47,7 +52,7 @@ struct EchoSuppressor {
 
   // TODO
   bool process_block(const float* far,
-                     const float* mic,
+                     const float* near,
                      float* out,
                      float* applied_gain = nullptr,
                      int* estimated_lag_samples = nullptr) {
@@ -70,17 +75,17 @@ struct EchoSuppressor {
     };
 
     // Step 2: マイクブロックの電力を計算
-    float mic_pow = 0.0f;
+    float near_pow = 0.0f;
     for (int i = 0; i < block; ++i) {
-      mic_pow += mic[i] * mic[i];
+      near_pow += near[i] * near[i];
     }
-    mic_pow = std::max(mic_pow, 1e-9f);
+    near_pow = std::max(near_pow, 1e-9f);
 
-    float mic_abs = 0.0f;
+    float near_abs = 0.0f;
     for (int i = 0; i < block; ++i) {
-      mic_abs += std::fabs(mic[i]);
+      near_abs += std::fabs(near[i]);
     }
-    mic_abs = std::max(mic_abs, 1e-9f);
+    near_abs = std::max(near_abs, 1e-9f);
 
     // Step 3: AMDFベースで遅延探索
     float best_score = -std::numeric_limits<float>::infinity();
@@ -95,13 +100,13 @@ struct EchoSuppressor {
         const size_t idx = wrap_index(hist_pos_,
                                       -static_cast<ptrdiff_t>(block + lag) + i);
         const float fx = far_hist_[idx];
-        const float my = mic[i];
+        const float my = near[i];
         far_pow += fx * fx;
         accum += std::fabs(fx - my);
         far_abs += std::fabs(fx);
       }
       far_pow = std::max(far_pow, 1e-9f);
-      float denom = mic_abs + far_abs;
+      float denom = near_abs + far_abs;
       denom = std::max(denom, 1e-9f);
       float score = 1.0f - (accum / denom);
       if (score > 1.0f) score = 1.0f;
@@ -118,7 +123,7 @@ struct EchoSuppressor {
 
     // Step 5: スコア・パワー条件でエコー検出
     const bool echo_detected = (best_score > kRhoThresh) &&
-                               (mic_pow < kPowerRatioAlpha * best_far_pow);
+                               (near_pow < kPowerRatioAlpha * best_far_pow);
 
     if (estimated_lag_samples) {
       *estimated_lag_samples = echo_detected ? best_lag : -1;
@@ -141,7 +146,7 @@ struct EchoSuppressor {
 
     // Step 9: 出力生成
     for (int i = 0; i < block; ++i) {
-      out[i] = mic[i] * gate_gain_;
+      out[i] = near[i] * gate_gain_;
     }
     if (applied_gain) {
       *applied_gain = gate_gain_;
@@ -149,11 +154,6 @@ struct EchoSuppressor {
     return suppress;
   }
 
- private:
-  std::vector<float> far_hist_;  // 遠端信号の履歴バッファ（リング）
-  size_t hist_pos_ = 0;          // 履歴バッファへの書き込み位置
-  float gate_gain_ = 1.0f;       // 現在適用中のゲイン値
-  int hang_cnt_ = 0;             // 抑圧を継続する残りブロック数
 };
 
 #endif  // MINES_SUPPRESSOR_H_
